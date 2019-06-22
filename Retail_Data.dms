@@ -1,0 +1,467 @@
+import org.apache.spark.sql.{SaveMode, SparkSession}
+import org.apache.log4j.Logger
+import org.apache.log4j.Level
+import org.apache.spark.sql.functions._
+
+object RetailProject {
+  def main(args: Array[String]): Unit = {
+
+    val databaseName="retaildatabase"
+    val orderTable="et_orders_hive"
+    val orderlineitemTable="et_order_lineitems_hive"
+    val customerDimTable="et_customers_dim_hive"
+    val customerAddDimTable="et_customer_addresses_dim_hive"
+    val prodDimTable="et_products_dim_hive"
+    val categoryDimTable="et_categories_dim_hive"
+    val local_filepath="/home/hduser/RetailDataset2/Results"
+
+    val spark = SparkSession
+                .builder()
+                .appName("Spark-Retail Case study")
+                .config("spark.master","local")
+                .config("spark.sql.warehouse.dir", "/user/hive/warehouse")
+                .config("hive.metastore.uris", "thrift://localhost:9083")
+                .enableHiveSupport()
+                .getOrCreate()
+
+    Logger.getLogger("org").setLevel(Level.OFF)
+    Logger.getLogger("akka").setLevel(Level.OFF)
+
+    //Creating database df
+    val db_df=spark.sqlContext.sql(s"use $databaseName")
+
+
+    //Create order table df
+    val orders_df=db_df.sqlContext.sql(s"select * from $orderTable ")
+
+
+    //1.Refund Turn around time----------------Working!
+    val refundTATime=orders_df.select(col("order_id") as "Order_id",
+                                      datediff(col("refund_datetime"),col("return_datetime")) as "RefundTurnAroundTime")
+                              .orderBy(col("RefundTurnAroundTime").desc)
+
+
+
+    //2.Ship Turn around time---------------Working!
+    val shipTATime=orders_df.select(col("order_id") as "Order_id",
+                                            datediff(col("ship_completion_datetime"),col("order_datetime")) as "ShipTurnAroundTime")
+                                    .orderBy(col("ShipTurnAroundTime").desc)
+
+
+    //3.Total customers----------------------Working!
+
+    //Create order line item table df
+    val orderlineitem_df=db_df.sqlContext.sql(s"select * from $orderlineitemTable ")
+
+    //Join Order and OrderLineItem
+    val joined_df=orders_df.join(orderlineitem_df,Seq("order_id",
+                                                      "customer_id",
+                                                      "store_id",
+                                                      "order_datetime",
+                                                      "coupon_amount",
+                                                      "payment_method_code",
+                                                      "website_url"))
+
+    val totalValues=joined_df.agg(count("customer_id") as "Total_Customers",
+                                   count("order_id") as "Total_Orders",
+                                   format_number(sum("item_price"),4) as "Total_ItemPrice",
+                                   format_number(sum(col("tax_amount") + col("item_price")),4) as "Price_AfterTax",
+                                   format_number(sum("tax_amount"),4) as "TotalTax_Amount",
+                                   format_number(sum("discount_amount"),4) as "Total_Discount",
+                                   format_number(sum("total_paid_amount"),4) as "Total_Amount",
+                                   format_number(avg("total_paid_amount"),4) as "AverageSales_Amount"
+                                   )
+
+     //4.Date-wise Details--------working!
+     val totalValues_bydate=joined_df.groupBy("order_datetime")
+                                     .agg(count("customer_id") as "Total_Customers",
+                                          format_number(sum("total_paid_amount"),4) as "Total_Amount",
+                                          format_number(sum("total_tax_amount"),4) as "Total_Tax",
+                                          format_number(sum(col("total_tax_amount")+col("total_paid_amount")),4) as "TotalAfter_Tax",
+                                          format_number(sum(col("total_discount_amount")*col("total_paid_amount"))/sum(col("total_paid_amount"))*100,4) as "Discount_Percent",
+                                          format_number(avg("item_price"),4) as "Avg_ItemPrice",
+                                          format_number(min("item_price"),2) as "Min_ItmPrice",
+                                          format_number(max("item_price"),2) as "Max_ItmPrice",
+                                          format_number(sum(col("coupon_amount")*col("total_paid_amount"))/sum(col("total_paid_amount"))*100,2) as "CouponPerTotal_Perc"
+                                         )
+
+
+     //5.GenderWice total matric-----------------Working!
+
+     //Create customer Dimension table df
+     val custDim_df=db_df.sqlContext.sql(s"select * from $customerDimTable")
+
+     //Join order-orderlineItemdf and CustomerDimension df
+     val order_Oline_custDimJoined_df=joined_df.join(custDim_df,Seq("customer_id"))
+
+     val genderwiseMetric=order_Oline_custDimJoined_df.groupBy("gender")
+                                                       .agg(count("customer_id") as "Total_Customers",
+                                                          count("order_id") as "Total_Orders",
+                                                         format_number(sum("item_price"),4) as "Total_ItemPrice",
+                                                         format_number(sum(col("tax_amount") + col("item_price")),4) as "Price_AfterTax",
+                                                         format_number(sum("tax_amount"),4) as "TotalTax_Amount",
+                                                         format_number(sum("discount_amount"),4) as "Total_Discount",
+                                                         format_number(sum("total_paid_amount"),4) as "Total_Amount",
+                                                         format_number(avg("total_paid_amount"),4) as "AverageSales_Amount"
+                                                         )
+
+
+
+     //6.Payment methodWise Metric---------Working!
+     val paymentMethodMetric=order_Oline_custDimJoined_df.groupBy("payment_method_code")
+                                                         .agg(count("customer_id") as "Total_Customers",
+                                                         count("order_id") as "Total_Orders",
+                                                         format_number(sum("item_price"),4) as "Total_ItemPrice",
+                                                         format_number(sum(col("tax_amount") + col("item_price")),4) as "Price_AfterTax",
+                                                         format_number(sum("tax_amount"),4) as "TotalTax_Amount",
+                                                         format_number(sum("discount_amount"),4) as "Total_Discount",
+                                                         format_number(sum("total_paid_amount"),4) as "Total_Amount",
+                                                         format_number(avg("total_paid_amount"),4) as "AverageSales_Amount"
+                                                         )
+
+
+     //7.City wise Metric------------------Working!
+     //Create customer Dimension table df
+     val custAddDim_df=db_df.sqlContext.sql(s"select * from $customerAddDimTable")
+
+     //Join Order&OrderLineItem with CustomerDimension
+     val order_Oline_custAddDimJoined_df=joined_df.join(custAddDim_df,Seq("customer_id"))
+
+     val citywiseMetric=order_Oline_custAddDimJoined_df.groupBy("city")
+                                                     .agg(count("customer_id") as "Total_Customers",
+                                                     count("order_id") as "Total_Orders",
+                                                     format_number(sum("item_price"),4) as "Total_ItemPrice",
+                                                     format_number(sum(col("tax_amount") + col("item_price")),4) as "Price_AfterTax",
+                                                     format_number(sum("tax_amount"),4) as "TotalTax_Amount",
+                                                     format_number(sum("discount_amount"),4) as "Total_Discount",
+                                                     format_number(sum("total_paid_amount"),4) as "Total_Amount",
+                                                     format_number(avg("total_paid_amount"),4) as "AverageSales_Amount"
+                                                     )
+
+
+      //8.State wise Metric--------------Working!
+      val statewiseMetric=order_Oline_custAddDimJoined_df.groupBy("state_code")
+                                                         .agg(count("customer_id") as "Total_Customers",
+                                                           count("order_id") as "Total_Orders",
+                                                           format_number(sum("item_price"),4) as "Total_ItemPrice",
+                                                           format_number(sum(col("tax_amount") + col("item_price")),4) as "Price_AfterTax",
+                                                           format_number(sum("tax_amount"),4) as "TotalTax_Amount",
+                                                           format_number(sum("discount_amount"),4) as "Total_Discount",
+                                                           format_number(sum("total_paid_amount"),4) as "Total_Amount",
+                                                           format_number(avg("total_paid_amount"),4) as "AverageSales_Amount"
+                                                           )
+
+
+     //9.Top10 States------------------Working!
+     val top10states=statewiseMetric.orderBy(col("Total_Customers").desc)
+
+
+     //10.Top 10 Postal Codes-----------working!
+     val top10postalcodes=order_Oline_custAddDimJoined_df.groupBy("zip_code").agg(count("customer_id") as "Total_Customers")
+                                                         .orderBy(col("Total_Customers").desc)
+
+     //11.Product namewise Details----------Working!
+     val totalValues_byProdName=joined_df.groupBy("product_name")
+                                         .agg(count("customer_id") as "Total_Customers",
+                                             format_number(sum("total_paid_amount"),4) as "Total_Amount",
+                                             format_number(sum("total_tax_amount"),4) as "Total_Tax",
+                                             format_number(sum(col("total_tax_amount")+col("total_paid_amount")),4) as "Total_AfterTax",
+                                             format_number(sum(col("total_discount_amount")*col("total_paid_amount"))/sum(col("total_paid_amount"))*100,4)
+                                                                       as "Discount_Percent",
+                                             format_number(avg("item_price"),4) as "Avg_ItemPrice",
+                                             format_number(min("item_price"),2) as "Min_ItmPrice",
+                                             format_number(max("item_price"),2) as "Max_ItmPrice",
+                                             format_number(sum(col("coupon_amount")*col("total_paid_amount"))/sum(col("total_paid_amount"))*100,2)
+                                                                       as "CouponPerTotal_Perc"
+                                             )
+
+
+     //12.Category name wise Details--------------Working!
+     //Create CategoryDimension table df
+     val categoryDim_df=db_df.sqlContext.sql(s"select * from $categoryDimTable")
+
+     //Create product Dimension table df
+     val prodDim_df=db_df.sqlContext.sql(s"select * from $prodDimTable")
+
+     //Join Order-OrderLine item with ProductDimension
+     val order_Oline_prodDimJoined_df=joined_df.join(prodDim_df,Seq("product_id"))
+
+     //Join Order-OrderLine-ProductDimension with CategoryDimension
+     val order_Oline_prodDim_categoryDimJoined_df = order_Oline_prodDimJoined_df.join(categoryDim_df,Seq("category_id"))
+
+     val totalValues_byCategName=order_Oline_prodDim_categoryDimJoined_df.groupBy("category_name")
+                                                                         .agg(count("customer_id") as "Total_Customers",
+                                                                             format_number(sum("total_paid_amount"),4) as "Total_Amount",
+                                                                             format_number(sum("total_tax_amount"),4) as "Total_Tax",
+                                                                             format_number(sum(col("total_tax_amount")+col("total_paid_amount")),4)
+                                                                                              as "Total_AfterTax",
+                                                                             format_number(sum(col("total_discount_amount")*col("total_paid_amount"))/sum(col("total_paid_amount"))*100,4)
+                                                                                             as "Discount_Percent",
+                                                                             format_number(avg("item_price"),4) as "Avg_ItemPrice",
+                                                                             format_number(min("item_price"),2) as "Min_ItmPrice",
+                                                                             format_number(max("item_price"),2) as "Max_ItmPrice",
+                                                                             format_number(sum(col("coupon_amount")*col("total_paid_amount"))/sum(col("total_paid_amount"))*100,2)
+                                                                                             as "CouponPerTotal_Perc"
+                                                                             )
+
+     //13.Top 10 category which shipped fast and its shipping time---------------Working!
+
+     val top10shipped=order_Oline_prodDim_categoryDimJoined_df.groupBy("category_name")
+                                                               .agg(sum(datediff(col("ship_completion_datetime"),col("ship_datetime"))*24*60*60 +
+                                                                         (hour(col("ship_completion_datetime"))-hour(col("ship_datetime")))*60*60 +
+                                                                         (minute(col("ship_completion_datetime"))-minute(col("ship_datetime")))*60 +
+                                                                         (second(col("ship_completion_datetime"))-second(col("ship_datetime")))
+                                                                       )
+                                                                     as "Shipping_TimeInSec")
+                                                               .orderBy(col("Shipping_TimeInSec").asc)
+
+     //14.No:of orders returned per day----------------------Working!
+     val orderRetPerDay= orderlineitem_df.groupBy("item_return_datetime")
+                                         .agg(count(col("item_return_datetime")) as "ReturnPerDay")
+                                         .orderBy("item_return_datetime")
+
+
+     //15.No:of orders refunded per day-----------------------Working!
+     val orderRefPerDay= orderlineitem_df.groupBy("item_refund_datetime")
+                                         .agg(count(col("item_refund_datetime")) as "RefundPerDay")
+                                         .orderBy("item_refund_datetime")
+
+
+    //16.The percentage of coupon amount percentage per day--------Working!
+    val couponPercPerDay= joined_df.groupBy("order_datetime")
+                                    .agg(format_number((sum(col("coupon_amount"))/sum(col("total_paid_amount")))*100,2)
+                                                        as "Coupon_PercentagePerDay"
+                                        )
+                                    .orderBy("order_datetime")
+
+
+
+    //Save Dataframes to Hive Tables-------------------------------
+    //1
+    refundTATime.write
+                .format("orc")
+                .mode(SaveMode.Append)
+                .saveAsTable("Result_Refund_TurnAround")
+
+    //2
+    shipTATime.write
+              .format("orc")
+              .mode(SaveMode.Append)
+              .saveAsTable("Result_Ship_TurnAround")
+
+
+    //3
+    totalValues.write
+                  .format("orc")
+                  .mode(SaveMode.Append)
+                  .saveAsTable("Result_total_Metric")
+
+    //4
+    totalValues_bydate.write
+                        .format("orc")
+                        .mode(SaveMode.Append)
+                        .saveAsTable("Result_Datewise_Metric")
+
+
+    //5
+    genderwiseMetric.write
+                    .format("orc")
+                    .mode(SaveMode.Append)
+                    .saveAsTable("Result_Genderwise_Metric")
+
+
+    //6
+    paymentMethodMetric.write
+                        .format("orc")
+                        .mode(SaveMode.Append)
+                        .saveAsTable("Result_Paymentwise_Metric")
+
+
+    //7
+    citywiseMetric.write
+                  .format("orc")
+                  .mode(SaveMode.Append)
+                  .saveAsTable("Result_Citywise_Metric")
+
+
+    //8
+    statewiseMetric.write
+                    .format("orc")
+                    .mode(SaveMode.Append)
+                    .saveAsTable("Result_Statewise_Metric")
+
+
+    //9
+    top10states.write
+                .format("orc")
+                .mode(SaveMode.Append)
+                .saveAsTable("Result_top10States")
+
+
+
+   //10
+    top10postalcodes.write
+                    .format("orc")
+                    .mode(SaveMode.Append)
+                    .saveAsTable("Result_Top10_PostalCodes")
+
+
+
+  //11
+    totalValues_byCategName.write
+                            .format("orc")
+                            .mode(SaveMode.Append)
+                            .saveAsTable("Result_Categorynamewise_metric")
+
+
+  //12
+    top10shipped.write
+                .format("orc")
+                .mode(SaveMode.Append)
+                .saveAsTable("Result_top10Shipped_Category")
+
+
+  //13
+    totalValues_byProdName.write
+                          .format("orc")
+                          .mode(SaveMode.Append)
+                          .saveAsTable("Result_Productnamewise_metric")
+
+
+  //14
+    orderRetPerDay.write
+                  .format("orc")
+                  .mode(SaveMode.Append)
+                  .saveAsTable("Result_OrderReturnedPerDay")
+
+
+
+  //15
+    orderRefPerDay.write
+                  .format("orc")
+                  .mode(SaveMode.Append)
+                  .saveAsTable("Result_OrderRefundedPerDay")
+
+
+
+  //16
+    couponPercPerDay.write
+                    .format("orc")
+                    .mode(SaveMode.Append)
+                    .saveAsTable("Result_Perc_CouponAmountPerDay")
+
+
+
+/*
+    //Save Dataframes as CSV file to Local Location-----------------------
+    //1
+
+    refundTATime.repartition(1)
+      .write
+      .option("header", "true")
+      .csv(local_filepath+"/Result_Refund_TurnAround")
+
+    //2
+    shipTATime.repartition(1)
+      .write
+      .option("header", "true")
+      .csv(local_filepath+"/Result_Ship_TurnAround")
+
+    //3
+    totalValues.repartition(1)
+      .write
+      .option("header", "true")
+      .csv(local_filepath+"/Result_total_Metric")
+
+
+    //4
+    totalValues_bydate.repartition(1)
+      .write
+      .option("header", "true")
+      .csv(local_filepath+"/Result_Datewise_Metric")
+
+    //5
+    genderwiseMetric.repartition(1)
+      .write
+      .option("header", "true")
+      .csv(local_filepath+"/Result_Genderwise_Metric")
+
+    //6
+    paymentMethodMetric.repartition(1)
+      .write
+      .option("header", "true")
+      .csv(local_filepath+"/Result_Paymentwise_Metric")
+
+    //7
+    citywiseMetric.repartition(1)
+      .write
+      .option("header", "true")
+      .csv(local_filepath+"/Result_Citywise_Metric")
+
+    //8
+    statewiseMetric.repartition(1)
+      .write
+      .option("header", "true")
+      .csv(local_filepath+"/Result_Statewise_Metric")
+
+    //9
+    top10states.repartition(1)
+      .write
+      .option("header", "true")
+      .csv(local_filepath+"/Result_top10States")
+
+
+    //10
+    top10postalcodes.repartition(1)
+      .write
+      .option("header", "true")
+      .csv(local_filepath+"/Result_Top10_PostalCodes")
+
+    //11
+    totalValues_byCategName.repartition(1)
+      .write
+      .option("header", "true")
+      .csv(local_filepath+"/Result_Categorynamewise_metric")
+
+
+    //12
+    top10shipped.repartition(1)
+      .write
+      .option("header", "true")
+      .csv(local_filepath+"/Result_top10Shipped_Category")
+
+    //13
+    totalValues_byProdName.repartition(1)
+      .write
+      .option("header", "true")
+      .csv(local_filepath+"/Result_Productnamewise_metric")
+
+    //14
+    orderRetPerDay.repartition(1)
+      .write
+      .option("header", "true")
+      .csv(local_filepath+"/Result_OrderReturnedPerDay")
+
+    //15
+    orderRefPerDay.repartition(1)
+      .write
+      .option("header", "true")
+      .csv(local_filepath+"/Result_OrderRefundedPerDay")
+
+    //16
+    couponPercPerDay.repartition(1)
+      .write
+      .option("header", "true")
+      .csv(local_filepath+"/Result_Perc_CouponAmountPerDay")
+
+*/
+    spark.stop()
+
+  }
+
+
+
+
+}
+
+
